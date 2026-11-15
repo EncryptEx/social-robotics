@@ -1,27 +1,165 @@
-# DD2413 Lab 1: personal guesses with Furhat
+# Furhat personalisation study
 
-This is a short prototype for the project *When Does Personalization Become Creepy?* Furhat refers to a disclosed fact, makes one explicitly uncertain inference, and adjusts its response to the participant's pause before replying. It is a demonstration of an observed social cue, not the full two-condition study.
+Prototype for the DD2413 project **“When Does Personalization Become Creepy?”**.
+Furhat first observes a participant with its camera and, when the evidence is
+stable, makes a cautious comment about a red hat. It then runs a short scripted
+interaction contrasting a disclosed fact with a personal inference and adapts
+its closing response to the participant's hesitation.
 
-## Run
+The camera remark happens before the study dialogue. It is intentionally
+limited to one reviewed, non-sensitive visual cue; the robot does not send
+images to an LLM or attempt to infer identity, age, gender, ethnicity, emotion,
+health, or other personal attributes.
 
-Use a laptop on the same network as Furhat. Enable the Realtime API for local network clients in Furhat's web interface first; see [setup](docs/setup.md).
-Python 3.10 or newer is required.
+## Interaction flow
+
+1. Furhat waits until its built-in user detector sees someone and attends to the
+   closest participant.
+2. It captures five camera frames and looks for a frontal face.
+3. Within the area around the face, it measures connected red pixels. A red-hat
+   comment is allowed only if at least 60% of usable frames pass the threshold.
+4. If the evidence is stable, Furhat says: “It looks like you might be wearing a
+   red hat. That is a nice splash of colour.” Otherwise it makes no claim about
+   the participant's appearance.
+5. Furhat asks permission to make the scripted personal guess. The operator
+   presses Enter only after the participant agrees.
+6. A reply that starts within three seconds receives a neutral acknowledgement.
+   A longer pause or silence makes Furhat back off and end the topic.
+
+All camera frames are processed in memory and discarded immediately. Nothing
+is written to disk by the interaction.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `lab1.py` | Furhat connection, visual opening, scripted dialogue, and response-timing policy |
+| `vision.py` | Camera decoding, face-localised red detection, and multi-frame consensus |
+| `test_lab1.py` | Dialogue-policy tests |
+| `test_vision.py` | Synthetic tests for image decoding, spatial filtering, and consensus |
+| `test-2.py` | Optional questionnaire that stores disclosed answers in Neo4j |
+| `compose.yaml` | Local Neo4j service for the optional questionnaire |
+
+## Requirements
+
+- Python 3.10 or newer
+- A physical Furhat robot running a version with the Realtime API
+- The laptop and Furhat on the same network
+- Realtime API local-network access enabled in Furhat's web interface
+- A participant facing the camera in reasonable, even lighting
+
+The virtual Furhat SDK does not expose a camera, so the visual opening must be
+tested on a physical robot. If the Realtime API is protected, create a Realtime
+API key in the robot interface and export it as `FURHAT_AUTH_KEY`. This is not
+the robot web-interface password and must never be committed.
+
+## Installation
 
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+## Run the complete interaction
+
+Choose only a profile whose facts the participant actually disclosed:
+
+```sh
 python lab1.py --host 192.168.1.114 --profile games
 ```
 
-If you already created the environment as `env/`, use `source env/bin/activate` instead of `.venv/bin/activate`, or run `env/bin/python lab1.py` directly.
+Available profiles are `games` and `reading`. The IP above is an example; use
+the address shown by the robot. The program prints every per-frame score and
+the final consensus so the team can explain and tune the perception step.
 
-If the Realtime API requires a key, set `FURHAT_AUTH_KEY` in your shell. This is a Realtime API key, not the web interface password. Do not commit it.
+For camera troubleshooting, run the dialogue without the visual opening:
 
-Two reviewed profiles are available: `games` and `reading`. Only use a profile whose facts the participant actually supplied. The operator presses Enter only after the participant agrees to the guess; Ctrl+C ends the interaction.
+```sh
+python lab1.py --host 192.168.1.114 --profile games --skip-vision
+```
 
-See [the documentation index](docs/README.md) for the assignment, rehearsal, and submission details.
+`--skip-vision` is a fallback, not the intended assessed demonstration.
 
-## Neo4j questionnaire prototype
+## Check the detector with a still image
 
-[`test-2.py`](test-2.py) asks three non-sensitive questions and stores each answer as a `Participant → Answer → Topic` path in Neo4j. See [Neo4j setup and commands](docs/neo4j.md).
+Before the live rehearsal, a local JPEG or PNG can be inspected without saving
+or transmitting anything:
+
+```sh
+python vision.py path/to/rehearsal-photo.jpg
+```
+
+The command reports whether it found a face, whether the red-headwear cue
+passed, the measured score, and the configured threshold. Use a frontal pose,
+keep the complete hat in frame, and avoid a large red background immediately
+behind the participant's head.
+
+## Tests
+
+Run the complete offline suite with:
+
+```sh
+python -m unittest -v
+```
+
+The image tests generate their own arrays and do not need a camera or example
+photos. A passing offline suite does not replace a rehearsal on the real robot.
+
+## Live rehearsal checklist
+
+- Put one participant in view and keep bystanders outside the frame.
+- Test a red hat from the real interaction distance and inspect all five scores.
+- Test without a red hat and confirm that Furhat makes no appearance claim.
+- Test a red shirt and confirm that the head-only region prevents a hat claim.
+- Rehearse one prompt answer, one pause longer than three seconds, and silence.
+- Confirm that Ctrl+C stops the interaction and disconnects cleanly.
+- If lighting or camera placement changes, repeat both positive and negative
+  tests before collecting data.
+
+The constants `RED_SCORE_THRESHOLD` and `MIN_CONSENSUS_RATIO` in `vision.py`
+control sensitivity. Change them only after checking multiple positive and
+negative examples, and record the final values used for every participant.
+
+## Known limitations
+
+This is a transparent colour-and-location heuristic, not a general clothing
+classifier. A red scarf, hair accessory, or red background near the face may
+look like headwear; dark or partially hidden red hats may be missed. The spoken
+line therefore says “might,” and unstable detections are suppressed. The
+system should not be presented as recognizing arbitrary clothing or as making
+psychological judgments from appearance.
+
+The response delay is likewise an interaction cue, not proof that a participant
+felt uncomfortable. The research outcome should come from the planned CRoSS,
+Godspeed, trust, and willingness-to-interact measures, not from this heuristic.
+
+## Optional Neo4j questionnaire
+
+`test-2.py` asks three non-sensitive questions and stores answers as:
+
+```text
+(Participant)-[:GAVE]->(Answer)-[:ABOUT]->(Topic)
+```
+
+Create `.env` from `.env.example`, choose a local password, and start Neo4j:
+
+```sh
+cp .env.example .env
+docker compose up -d
+python test-2.py --participant-id demo01 --mode voice --host 192.168.1.114
+```
+
+Use pseudonymous participant IDs. `--dry-run` previews answers without writing,
+and `--mode terminal` tests the questionnaire without Furhat. Questionnaire
+answers are disclosed facts; they must not be labelled as visual observations.
+
+## Privacy and study use
+
+Obtain consent before collecting questionnaire answers or recording a demo.
+Tell participants that the camera is used for the opening observation and that
+speech may be processed by Furhat's configured recognizer. Allow them to skip
+questions, correct the robot, stop the interaction, and withdraw their data.
+Do not silently add face recognition, image storage, cloud vision, or new
+appearance-based inferences without updating the consent and study protocol.

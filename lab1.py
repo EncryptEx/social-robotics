@@ -7,6 +7,8 @@ import time
 
 from furhat_realtime_api import AsyncFurhatClient, Events
 
+from vision import RedHeadwearDetector, VisualObservation, summarize_detections
+
 
 PROFILES = {
     "games": (
@@ -20,6 +22,8 @@ PROFILES = {
 }
 HESITATION_SECONDS = 3.0
 LISTEN_TIMEOUT_SECONDS = 8.0
+VISION_FRAMES = 5
+VISION_FRAME_INTERVAL_SECONDS = 0.35
 
 
 def response_for(latency: float | None) -> str:
@@ -68,6 +72,47 @@ class Demo:
             await asyncio.sleep(0.5)
         raise TimeoutError("No participant detected in 30 seconds")
 
+    async def observe_user(
+        self,
+        detector: RedHeadwearDetector,
+        frame_count: int = VISION_FRAMES,
+        frame_interval: float = VISION_FRAME_INTERVAL_SECONDS,
+    ) -> VisualObservation | None:
+        """Use several in-memory camera frames to form one cautious observation."""
+
+        detections = []
+        print(f"Checking {frame_count} camera frames for a reviewed visual cue...")
+        for frame_number in range(1, frame_count + 1):
+            try:
+                event = await self.furhat.request_camera_once()
+                detection = detector.detect_event(event)
+            except Exception as exc:
+                # Visual personalization is optional at runtime. A bad frame or
+                # unavailable camera must not prevent the consented dialogue.
+                print(f"Camera frame {frame_number} skipped: {exc}")
+            else:
+                detections.append(detection)
+                print(
+                    f"Camera frame {frame_number}: face={detection.face_found}, "
+                    f"red-headwear score={detection.red_headwear_score:.3f}"
+                )
+            if frame_number < frame_count:
+                await asyncio.sleep(frame_interval)
+
+        observation = summarize_detections(detections)
+        if observation is None:
+            print(
+                "Visual observation: no stable red-headwear cue; "
+                "saying nothing about appearance."
+            )
+        else:
+            print(
+                "Visual observation: "
+                f"{observation.kind}, confidence={observation.confidence:.2f}, "
+                f"frames={observation.matching_frames}/{observation.usable_frames}"
+            )
+        return observation
+
     async def listen(
         self,
         no_speech_timeout: float = LISTEN_TIMEOUT_SECONDS,
@@ -99,13 +144,19 @@ class Demo:
             self.hear_end = None
             await self.furhat.request_listen_stop()
 
-    async def run(self, profile: str):
+    async def run(self, profile: str, vision_enabled: bool = True):
         await self.furhat.connect()
         self.furhat.add_handler(Events.response_speak_end, self.on_speech_end)
         self.furhat.add_handler(Events.response_hear_start, self.on_hear_start)
         self.furhat.add_handler(Events.response_hear_end, self.on_hear_end)
         try:
             await self.wait_for_person()
+            if vision_enabled:
+                observation = await self.observe_user(RedHeadwearDetector())
+                if observation is not None:
+                    # The visual remark deliberately happens before the study
+                    # dialogue, as required by the project demonstration.
+                    await self.say(observation.utterance)
             await self.say("Hello. I am Furhat. May I try a small guess based on something you shared?")
             # The operator confirms consent before the scripted interaction proceeds.
             await asyncio.to_thread(input, "Operator: press Enter after the participant agrees, or Ctrl+C to stop: ")
@@ -126,9 +177,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="192.168.1.114", help="Robot IP address")
     parser.add_argument("--profile", choices=PROFILES, default="games")
+    parser.add_argument(
+        "--skip-vision",
+        action="store_true",
+        help="Skip the camera-based opening remark (for troubleshooting only)",
+    )
     args = parser.parse_args()
     try:
-        asyncio.run(Demo(args.host, os.getenv("FURHAT_AUTH_KEY")).run(args.profile))
+        asyncio.run(
+            Demo(args.host, os.getenv("FURHAT_AUTH_KEY")).run(
+                args.profile, vision_enabled=not args.skip_vision
+            )
+        )
     except (KeyboardInterrupt, EOFError):
         print("Demo cancelled.")
     except OSError as exc:
