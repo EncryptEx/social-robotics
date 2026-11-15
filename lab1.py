@@ -7,8 +7,7 @@ import time
 
 from furhat_realtime_api import AsyncFurhatClient, Events
 
-from transcript_validation import CohereTranscriptValidator
-from vision import RedHeadwearDetector, VisualObservation, summarize_detections
+from vision import CohereVisionObserver, VisualObservation
 
 
 PROFILES = {
@@ -23,8 +22,6 @@ PROFILES = {
 }
 HESITATION_SECONDS = 3.0
 LISTEN_TIMEOUT_SECONDS = 8.0
-VISION_FRAMES = 5
-VISION_FRAME_INTERVAL_SECONDS = 0.35
 
 
 def response_for(latency: float | None) -> str:
@@ -75,44 +72,26 @@ class Demo:
 
     async def observe_user(
         self,
-        detector: RedHeadwearDetector,
-        frame_count: int = VISION_FRAMES,
-        frame_interval: float = VISION_FRAME_INTERVAL_SECONDS,
+        observer: CohereVisionObserver,
     ) -> VisualObservation | None:
-        """Use several in-memory camera frames to form one cautious observation."""
+        """Ask Cohere for one safe observation from an in-memory camera frame."""
 
-        detections = []
-        print(f"Checking {frame_count} camera frames for a reviewed visual cue...")
-        for frame_number in range(1, frame_count + 1):
-            try:
-                event = await self.furhat.request_camera_once()
-                detection = detector.detect_event(event)
-            except Exception as exc:
-                # Visual personalization is optional at runtime. A bad frame or
-                # unavailable camera must not prevent the consented dialogue.
-                print(f"Camera frame {frame_number} skipped: {exc}")
-            else:
-                detections.append(detection)
-                print(
-                    f"Camera frame {frame_number}: face={detection.face_found}, "
-                    f"red-headwear score={detection.red_headwear_score:.3f}"
-                )
-            if frame_number < frame_count:
-                await asyncio.sleep(frame_interval)
-
-        observation = summarize_detections(detections)
-        if observation is None:
+        print("Capturing one camera frame for a visual opening...")
+        try:
+            event = await self.furhat.request_camera_once()
+        except Exception as exc:
             print(
-                "Visual observation: no stable red-headwear cue; "
-                "saying nothing about appearance."
+                "Visual observation: source=fallback, "
+                f"reason='Camera unavailable ({type(exc).__name__})'"
             )
-        else:
-            print(
-                "Visual observation: "
-                f"{observation.kind}, confidence={observation.confidence:.2f}, "
-                f"frames={observation.matching_frames}/{observation.usable_frames}"
-            )
-        return observation
+            return None
+        observation = await observer.observe(event)
+        print(
+            "Visual observation: "
+            f"source={observation.source}, reason={observation.reason!r}, "
+            f"utterance={observation.utterance!r}"
+        )
+        return observation if observation.should_speak else None
 
     async def listen(
         self,
@@ -145,53 +124,10 @@ class Demo:
             self.hear_end = None
             await self.furhat.request_listen_stop()
 
-    async def listen_for_valid_answer(
-        self,
-        question: str,
-        validator: CohereTranscriptValidator | None,
-        *,
-        no_speech_timeout: float = LISTEN_TIMEOUT_SECONDS,
-        end_speech_timeout: float = 1.0,
-        answer_timeout: float = 15.0,
-        max_attempts: int = 2,
-    ) -> tuple[float | None, str]:
-        """Listen and ask once for repetition when Cohere rejects the transcript."""
-
-        first_latency = None
-        for attempt in range(max_attempts):
-            latency, transcript = await self.listen(
-                no_speech_timeout=no_speech_timeout,
-                end_speech_timeout=end_speech_timeout,
-                answer_timeout=answer_timeout,
-            )
-            if attempt == 0:
-                first_latency = latency
-
-            transcript = transcript.strip()
-            if not transcript or validator is None:
-                return first_latency, transcript
-
-            validation = await validator.validate(question, transcript)
-            print(
-                "Transcript validation: "
-                f"accepted={validation.accepted}, source={validation.source}, "
-                f"reason={validation.reason!r}"
-            )
-            if validation.accepted:
-                return first_latency, validation.transcript
-
-            if attempt + 1 < max_attempts:
-                await self.say(
-                    "I may not have heard that correctly. Could you say that again?"
-                )
-
-        return first_latency, ""
-
     async def run(
         self,
         profile: str,
-        vision_enabled: bool = True,
-        transcript_validator: CohereTranscriptValidator | None = None,
+        vision_observer: CohereVisionObserver | None = None,
     ):
         await self.furhat.connect()
         self.furhat.add_handler(Events.response_speak_end, self.on_speech_end)
@@ -199,8 +135,8 @@ class Demo:
         self.furhat.add_handler(Events.response_hear_end, self.on_hear_end)
         try:
             await self.wait_for_person()
-            if vision_enabled:
-                observation = await self.observe_user(RedHeadwearDetector())
+            if vision_observer is not None:
+                observation = await self.observe_user(vision_observer)
                 if observation is not None:
                     # The visual remark deliberately happens before the study
                     # dialogue, as required by the project demonstration.
@@ -211,17 +147,9 @@ class Demo:
             fact, guess = PROFILES[profile]
             await self.say(fact)
             await self.say(guess)
-            latency, transcript = await self.listen_for_valid_answer(
-                guess, transcript_validator
-            )
+            latency, transcript = await self.listen()
             print(f"Response latency: {latency!r} seconds; transcript: {transcript!r}")
-            if latency is not None and not transcript:
-                await self.say(
-                    "I am sorry I still could not understand clearly. "
-                    "We can leave the guess there."
-                )
-            else:
-                await self.say(response_for(latency))
+            await self.say(response_for(latency))
         finally:
             try:
                 await self.furhat.request_listen_stop()
@@ -238,15 +166,10 @@ def main():
         action="store_true",
         help="Skip the camera-based opening remark (for troubleshooting only)",
     )
-    parser.add_argument(
-        "--skip-cohere",
-        action="store_true",
-        help="Accept raw speech transcripts without Cohere validation",
-    )
     args = parser.parse_args()
     try:
-        validator = (
-            None if args.skip_cohere else CohereTranscriptValidator.from_environment()
+        vision_observer = (
+            None if args.skip_vision else CohereVisionObserver.from_environment()
         )
     except ValueError as exc:
         parser.error(str(exc))
@@ -254,8 +177,7 @@ def main():
         asyncio.run(
             Demo(args.host, os.getenv("FURHAT_AUTH_KEY")).run(
                 args.profile,
-                vision_enabled=not args.skip_vision,
-                transcript_validator=validator,
+                vision_observer=vision_observer,
             )
         )
     except (KeyboardInterrupt, EOFError):

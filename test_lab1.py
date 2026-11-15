@@ -17,7 +17,7 @@ if "furhat_realtime_api" not in sys.modules:
         sys.modules["furhat_realtime_api"] = module
 
 from lab1 import Demo, HESITATION_SECONDS, response_for
-from transcript_validation import TranscriptValidation
+from vision import VisualObservation
 
 
 class ResponsePolicyTests(unittest.TestCase):
@@ -33,55 +33,35 @@ class ResponsePolicyTests(unittest.TestCase):
         self.assertEqual(response_for(None), hesitant)
 
 
-class FakeValidator:
-    def __init__(self, validations):
-        self.validations = iter(validations)
-        self.transcripts = []
-
-    async def validate(self, question, transcript):
-        self.transcripts.append((question, transcript))
-        return next(self.validations)
-
-
-class ValidatedListeningTests(unittest.IsolatedAsyncioTestCase):
-    async def test_rejected_transcript_is_retried_once(self):
-        validator = FakeValidator(
-            [
-                TranscriptValidation(False, "", "Gibberish", "cohere"),
-                TranscriptValidation(True, "Yes, that is right", "Relevant", "cohere"),
-            ]
-        )
+class VisualOpeningTests(unittest.IsolatedAsyncioTestCase):
+    async def test_safe_observation_is_returned(self):
         with patch("lab1.AsyncFurhatClient"):
             demo = Demo("127.0.0.1", None)
-        demo.listen = AsyncMock(
-            side_effect=[(1.25, "Blue seven window"), (0.4, "Yes, that is right")]
+        demo.furhat.request_camera_once = AsyncMock(return_value={"image": "jpeg"})
+        observer = AsyncMock()
+        observer.observe.return_value = VisualObservation(
+            "I notice you're wearing a blue sweater.",
+            "Clear clothing detail",
+            "cohere",
         )
-        demo.say = AsyncMock()
 
-        latency, transcript = await demo.listen_for_valid_answer(
-            "Do you prefer small gatherings?", validator
-        )
+        result = await demo.observe_user(observer)
 
-        self.assertEqual(latency, 1.25)
-        self.assertEqual(transcript, "Yes, that is right")
-        demo.say.assert_awaited_once()
-        self.assertEqual(len(validator.transcripts), 2)
+        self.assertEqual(result.utterance, "I notice you're wearing a blue sweater.")
+        observer.observe.assert_awaited_once_with({"image": "jpeg"})
 
-    async def test_silence_is_not_sent_to_cohere_or_retried(self):
-        validator = FakeValidator([])
+    async def test_camera_failure_skips_visual_opening(self):
         with patch("lab1.AsyncFurhatClient"):
             demo = Demo("127.0.0.1", None)
-        demo.listen = AsyncMock(return_value=(None, ""))
-        demo.say = AsyncMock()
-
-        latency, transcript = await demo.listen_for_valid_answer(
-            "What hobby do you enjoy?", validator
+        demo.furhat.request_camera_once = AsyncMock(
+            side_effect=TimeoutError("camera offline")
         )
+        observer = AsyncMock()
 
-        self.assertIsNone(latency)
-        self.assertEqual(transcript, "")
-        demo.say.assert_not_awaited()
-        self.assertEqual(validator.transcripts, [])
+        result = await demo.observe_user(observer)
+
+        self.assertIsNone(result)
+        observer.observe.assert_not_awaited()
 
 
 if __name__ == "__main__":
