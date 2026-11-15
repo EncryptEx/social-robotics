@@ -1,10 +1,11 @@
-"""Ask a few non-sensitive questions and save the answers as a Neo4j graph."""
+"""Ask non-sensitive questions and save direct semantic facts in Neo4j."""
 
 import argparse
 import asyncio
 import os
 
 from lab1 import Demo
+from knowledge_graph import CohereFactExtractor, check_graph, save_facts
 
 
 QUESTIONS = (
@@ -15,43 +16,6 @@ QUESTIONS = (
 QUESTION_START_TIMEOUT = 20.0
 ANSWER_PAUSE_TIMEOUT = 3.0
 ANSWER_TOTAL_TIMEOUT = 60.0
-
-
-def save_graph(participant_id: str, answers: dict[str, str], uri: str, user: str, password: str):
-    from neo4j import GraphDatabase
-
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
-        driver.verify_connectivity()
-        for topic, answer in answers.items():
-            driver.execute_query(
-                """
-                MERGE (p:Participant {id: $participant_id})
-                MERGE (t:Topic {key: $topic})
-                MERGE (a:Answer {participant_id: $participant_id, topic: $topic})
-                SET a.text = $answer
-                MERGE (p)-[:GAVE]->(a)
-                MERGE (a)-[:ABOUT]->(t)
-                """,
-                participant_id=participant_id,
-                topic=topic,
-                answer=answer,
-            )
-        records, _, _ = driver.execute_query(
-            """
-            MATCH (p:Participant {id: $participant_id})-[:GAVE]->(a:Answer)-[:ABOUT]->(t:Topic)
-            RETURN t.key AS topic, a.text AS answer
-            ORDER BY topic
-            """,
-            participant_id=participant_id,
-        )
-        return [(record["topic"], record["answer"]) for record in records]
-
-
-def check_graph(uri: str, user: str, password: str):
-    from neo4j import GraphDatabase
-
-    with GraphDatabase.driver(uri, auth=(user, password)) as driver:
-        driver.verify_connectivity()
 
 
 async def ask_with_furhat(
@@ -111,6 +75,11 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Show answers without writing to Neo4j")
     args = parser.parse_args()
 
+    try:
+        extractor = CohereFactExtractor.from_environment()
+    except ValueError as exc:
+        parser.error(str(exc))
+
     uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
     user = os.getenv("NEO4J_USER", "neo4j")
     password = os.getenv("NEO4J_PASSWORD")
@@ -134,14 +103,24 @@ def main():
     if not answers:
         print("No answers given; nothing was saved.")
         return
-    if args.dry_run:
-        print(f"Preview for {args.participant_id}: {answers}")
+
+    try:
+        facts = asyncio.run(extractor.extract(answers))
+    except Exception as exc:
+        parser.exit(1, f"Cohere could not extract safe semantic facts: {exc}\n")
+    if not facts:
+        print("No explicit semantic facts could be extracted; nothing was saved.")
         return
 
-    saved = save_graph(args.participant_id, answers, uri, user, password)
-    print("Saved graph facts:")
-    for topic, answer in saved:
-        print(f"  {topic}: {answer}")
+    heading = "Extracted graph preview:" if args.dry_run else "Saved graph facts:"
+    if not args.dry_run:
+        save_facts(args.participant_id, facts, uri, user, password)
+    print(heading)
+    for fact in facts:
+        print(
+            f"  ({args.participant_id})-[:{fact.relation}]->"
+            f"({fact.concept!r})  [from {fact.question_key}]"
+        )
 
 
 if __name__ == "__main__":

@@ -24,8 +24,13 @@ RESPONSE_FORMAT = {
             "should_comment": {"type": "boolean"},
             "utterance": {"type": "string"},
             "reason": {"type": "string"},
+            "visible_details": {
+                "type": "array",
+                "maxItems": 3,
+                "items": {"type": "string"},
+            },
         },
-        "required": ["should_comment", "utterance", "reason"],
+        "required": ["should_comment", "utterance", "reason", "visible_details"],
     },
 }
 
@@ -35,6 +40,8 @@ conversation. Mention only obvious, non-sensitive, directly visible details,
 such as clothing items and colours, glasses, a hat, jewellery, or an object the
 person is holding. The utterance must be in English, start with "I notice", use
 second-person wording, contain at most 20 words, and sound natural when spoken.
+Also return one to three short visible_details supporting the utterance, or an
+empty list when no comment should be made.
 
 Never mention or infer identity, age, gender, ethnicity, nationality, religion,
 health, disability, pregnancy, attractiveness, emotion, mood, personality,
@@ -62,6 +69,7 @@ class VisualObservation:
     utterance: str
     reason: str
     source: str
+    visible_details: tuple[str, ...] = ()
 
     @property
     def should_speak(self) -> bool:
@@ -172,10 +180,13 @@ class CohereVisionObserver:
         should_comment = decision.get("should_comment")
         utterance = decision.get("utterance")
         reason = decision.get("reason")
+        visible_details = decision.get("visible_details")
         if (
             not isinstance(should_comment, bool)
             or not isinstance(utterance, str)
             or not isinstance(reason, str)
+            or not isinstance(visible_details, list)
+            or not all(isinstance(detail, str) for detail in visible_details)
         ):
             raise ValueError("Cohere response did not match the vision schema")
 
@@ -186,11 +197,19 @@ class CohereVisionObserver:
             raise ValueError("Visual utterance did not use the required wording")
         if len(utterance.split()) > 20 or len(utterance) > 180:
             raise ValueError("Visual utterance was too long")
-        if SENSITIVE_OUTPUT.search(utterance):
+        details = tuple(" ".join(detail.split()) for detail in visible_details)
+        if not 1 <= len(details) <= 3 or any(
+            not detail or len(detail) > 80 for detail in details
+        ):
+            raise ValueError("Visual response did not include supporting details")
+        if SENSITIVE_OUTPUT.search(utterance) or any(
+            SENSITIVE_OUTPUT.search(detail) for detail in details
+        ):
             raise ValueError("Visual utterance contained a sensitive inference")
 
         return VisualObservation(
             utterance=utterance,
             reason=reason.strip() or "Safe visible detail",
             source="cohere",
+            visible_details=details,
         )

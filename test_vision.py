@@ -58,6 +58,7 @@ class VisionObservationTests(unittest.IsolatedAsyncioTestCase):
                     "should_comment": True,
                     "utterance": "I notice you're wearing a blue sweater and round glasses.",
                     "reason": "Two clear visible details",
+                    "visible_details": ["blue sweater", "round glasses"],
                 }
             )
         )
@@ -68,6 +69,7 @@ class VisionObservationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.should_speak)
         self.assertEqual(result.source, "cohere")
         self.assertIn("blue sweater", result.utterance)
+        self.assertEqual(result.visible_details, ("blue sweater", "round glasses"))
         call = client.calls[0]
         self.assertEqual(call["model"], "command-a-vision-07-2025")
         self.assertEqual(call["temperature"], 0)
@@ -82,6 +84,7 @@ class VisionObservationTests(unittest.IsolatedAsyncioTestCase):
                     "should_comment": False,
                     "utterance": "",
                     "reason": "No person clearly visible",
+                    "visible_details": [],
                 }
             )
         )
@@ -98,6 +101,7 @@ class VisionObservationTests(unittest.IsolatedAsyncioTestCase):
                     "should_comment": True,
                     "utterance": "I notice you're a young woman wearing a green shirt.",
                     "reason": "Visible person",
+                    "visible_details": ["young woman", "green shirt"],
                 }
             )
         )
@@ -129,6 +133,7 @@ class VisionObservationTests(unittest.IsolatedAsyncioTestCase):
                             "should_comment": True,
                             "utterance": utterance,
                             "reason": "Visible clothes",
+                            "visible_details": ["blue clothes"],
                         }
                     )
                 )

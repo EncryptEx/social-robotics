@@ -1,4 +1,4 @@
-"""Short, scripted Furhat interaction for DD2413 Lab 1."""
+"""Run the controlled factual/inference Furhat interaction for DD2413."""
 
 import argparse
 import asyncio
@@ -7,28 +7,24 @@ import time
 
 from furhat_realtime_api import AsyncFurhatClient, Events
 
+from knowledge_graph import load_facts
+from study_dialogue import CONDITIONS, CohereDialogueGenerator, DialoguePair, STUDY_TOPIC
 from vision import CohereVisionObserver, VisualObservation
 
 
-PROFILES = {
-    "games": (
-        "You told us that you enjoy video games and quiet weekends.",
-        "I might be wrong, but I would guess you prefer smaller gatherings. Is that right?",
-    ),
-    "reading": (
-        "You told us that you enjoy reading and quiet weekends.",
-        "I might be wrong, but I would guess you like having time to yourself. Is that right?",
-    ),
-}
 HESITATION_SECONDS = 3.0
 LISTEN_TIMEOUT_SECONDS = 8.0
 
 
-def response_for(latency: float | None) -> str:
+def response_for(latency: float | None, condition: str = "inference") -> str:
     """Treat a long pause as a cue to reduce the intensity of the interaction."""
     if latency is None or latency >= HESITATION_SECONDS:
-        return "I may have made that too personal. We can leave the guess there. Thank you for talking with me."
-    return "Thanks for telling me. A guess can sound different from a fact, and I appreciate your reaction."
+        if condition == "inference":
+            return "I may have made that too personal. We can leave the guess there. Thank you for talking with me."
+        return "We can leave that question there. Thank you for talking with me."
+    if condition == "inference":
+        return "Thanks for telling me. I appreciate your reaction to the guess."
+    return "Thanks for telling me. I appreciate your answer."
 
 
 class Demo:
@@ -89,6 +85,7 @@ class Demo:
         print(
             "Visual observation: "
             f"source={observation.source}, reason={observation.reason!r}, "
+            f"details={observation.visible_details!r}, "
             f"utterance={observation.utterance!r}"
         )
         return observation if observation.should_speak else None
@@ -126,7 +123,8 @@ class Demo:
 
     async def run(
         self,
-        profile: str,
+        study_utterance: str,
+        condition: str,
         vision_observer: CohereVisionObserver | None = None,
     ):
         await self.furhat.connect()
@@ -141,15 +139,18 @@ class Demo:
                     # The visual remark deliberately happens before the study
                     # dialogue, as required by the project demonstration.
                     await self.say(observation.utterance)
-            await self.say("Hello. I am Furhat. May I try a small guess based on something you shared?")
+            permission = (
+                "May I try a small guess based on something you shared?"
+                if condition == "inference"
+                else "May I ask a short question based on something you shared?"
+            )
+            await self.say(f"Hello. I am Furhat. {permission}")
             # The operator confirms consent before the scripted interaction proceeds.
             await asyncio.to_thread(input, "Operator: press Enter after the participant agrees, or Ctrl+C to stop: ")
-            fact, guess = PROFILES[profile]
-            await self.say(fact)
-            await self.say(guess)
+            await self.say(study_utterance)
             latency, transcript = await self.listen()
             print(f"Response latency: {latency!r} seconds; transcript: {transcript!r}")
-            await self.say(response_for(latency))
+            await self.say(response_for(latency, condition))
         finally:
             try:
                 await self.furhat.request_listen_stop()
@@ -157,26 +158,68 @@ class Demo:
                 await self.furhat.disconnect()
 
 
+def print_review(
+    participant_id: str,
+    condition: str,
+    pair: DialoguePair,
+) -> None:
+    """Show both matched variants so a researcher can check the manipulation."""
+
+    print("\n--- REQUIRED RESEARCHER REVIEW ---")
+    print(f"Participant: {participant_id}")
+    print(f"Hard-coded topic: {STUDY_TOPIC}")
+    print(f"Source facts: {', '.join(pair.source_fact_ids)}")
+    print(f"Factual:   {pair.factual_utterance}")
+    print(f"Inference: {pair.inference_utterance}")
+    print(f"Assigned condition: {condition}")
+    print("----------------------------------\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="192.168.1.114", help="Robot IP address")
-    parser.add_argument("--profile", choices=PROFILES, default="games")
+    parser.add_argument("--participant-id", required=True, help="Pseudonymous graph ID")
+    parser.add_argument("--condition", required=True, choices=CONDITIONS)
     parser.add_argument(
         "--skip-vision",
         action="store_true",
         help="Skip the camera-based opening remark (for troubleshooting only)",
     )
     args = parser.parse_args()
+
+    uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    user = os.getenv("NEO4J_USER", "neo4j")
+    password = os.getenv("NEO4J_PASSWORD", "").strip()
+    if not password or password.startswith("replace-with-"):
+        parser.error("Set NEO4J_PASSWORD before loading participant facts")
     try:
+        facts = load_facts(args.participant_id, uri, user, password)
+    except Exception as exc:
+        parser.exit(2, f"Cannot load facts from Neo4j at {uri}: {exc}\n")
+    if not facts:
+        parser.error(
+            f"No explicit semantic facts found for participant {args.participant_id!r}"
+        )
+
+    try:
+        dialogue_generator = CohereDialogueGenerator.from_environment()
         vision_observer = (
             None if args.skip_vision else CohereVisionObserver.from_environment()
         )
     except ValueError as exc:
         parser.error(str(exc))
     try:
+        pair = asyncio.run(dialogue_generator.generate(facts))
+        print_review(args.participant_id, args.condition, pair)
+        approval = input(
+            "Researcher: type APPROVE after checking both variants, or Ctrl+C to stop: "
+        )
+        if approval.strip() != "APPROVE":
+            parser.exit(2, "Dialogue was not approved; robot interaction cancelled.\n")
         asyncio.run(
             Demo(args.host, os.getenv("FURHAT_AUTH_KEY")).run(
-                args.profile,
+                pair.for_condition(args.condition),
+                args.condition,
                 vision_observer=vision_observer,
             )
         )
@@ -184,6 +227,8 @@ def main():
         print("Demo cancelled.")
     except OSError as exc:
         parser.exit(1, f"Cannot connect to Furhat at {args.host}:9000 ({exc}). Check the robot IP, network, and Realtime API setting.\n")
+    except Exception as exc:
+        parser.exit(1, f"Study interaction failed safely: {exc}\n")
 
 
 if __name__ == "__main__":
