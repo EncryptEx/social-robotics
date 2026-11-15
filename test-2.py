@@ -5,6 +5,7 @@ import asyncio
 import os
 
 from lab1 import Demo
+from transcript_validation import CohereTranscriptValidator
 
 
 QUESTIONS = (
@@ -54,7 +55,11 @@ def check_graph(uri: str, user: str, password: str):
         driver.verify_connectivity()
 
 
-async def ask_with_furhat(host: str, auth_key: str | None) -> dict[str, str]:
+async def ask_with_furhat(
+    host: str,
+    auth_key: str | None,
+    transcript_validator: CohereTranscriptValidator | None,
+) -> dict[str, str]:
     demo = Demo(host, auth_key)
     await demo.furhat.connect()
     demo.furhat.add_handler("response.speak.end", demo.on_speech_end)
@@ -63,10 +68,17 @@ async def ask_with_furhat(host: str, auth_key: str | None) -> dict[str, str]:
     answers = {}
     try:
         await demo.wait_for_person()
-        await demo.say("Hello. I will ask three questions about everyday preferences and save your answers locally. You may skip any question by staying silent.")
+        await demo.say(
+            "Hello. I will ask three questions about everyday preferences and "
+            "save your answers locally. A language model checks whether each "
+            "speech transcript is a meaningful answer. You may skip any question "
+            "by staying silent."
+        )
         for topic, question in QUESTIONS:
             await demo.say(question)
-            _, text = await demo.listen(
+            _, text = await demo.listen_for_valid_answer(
+                question,
+                transcript_validator,
                 no_speech_timeout=QUESTION_START_TIMEOUT,
                 end_speech_timeout=ANSWER_PAUSE_TIMEOUT,
                 answer_timeout=ANSWER_TOTAL_TIMEOUT,
@@ -103,6 +115,11 @@ def main():
     parser.add_argument("--mode", choices=("voice", "terminal"), default="voice")
     parser.add_argument("--host", default="192.168.1.114")
     parser.add_argument("--dry-run", action="store_true", help="Show answers without writing to Neo4j")
+    parser.add_argument(
+        "--skip-cohere",
+        action="store_true",
+        help="Accept raw speech transcripts without Cohere validation",
+    )
     args = parser.parse_args()
 
     uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -119,7 +136,19 @@ def main():
             parser.exit(2, f"Cannot connect to Neo4j at {uri}: {exc}\n")
 
     if args.mode == "voice":
-        answers = asyncio.run(ask_with_furhat(args.host, os.getenv("FURHAT_AUTH_KEY")))
+        try:
+            validator = (
+                None
+                if args.skip_cohere
+                else CohereTranscriptValidator.from_environment()
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        answers = asyncio.run(
+            ask_with_furhat(
+                args.host, os.getenv("FURHAT_AUTH_KEY"), validator
+            )
+        )
     else:
         answers = ask_in_terminal()
 

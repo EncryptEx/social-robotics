@@ -7,6 +7,7 @@ import time
 
 from furhat_realtime_api import AsyncFurhatClient, Events
 
+from transcript_validation import CohereTranscriptValidator
 from vision import RedHeadwearDetector, VisualObservation, summarize_detections
 
 
@@ -144,7 +145,54 @@ class Demo:
             self.hear_end = None
             await self.furhat.request_listen_stop()
 
-    async def run(self, profile: str, vision_enabled: bool = True):
+    async def listen_for_valid_answer(
+        self,
+        question: str,
+        validator: CohereTranscriptValidator | None,
+        *,
+        no_speech_timeout: float = LISTEN_TIMEOUT_SECONDS,
+        end_speech_timeout: float = 1.0,
+        answer_timeout: float = 15.0,
+        max_attempts: int = 2,
+    ) -> tuple[float | None, str]:
+        """Listen and ask once for repetition when Cohere rejects the transcript."""
+
+        first_latency = None
+        for attempt in range(max_attempts):
+            latency, transcript = await self.listen(
+                no_speech_timeout=no_speech_timeout,
+                end_speech_timeout=end_speech_timeout,
+                answer_timeout=answer_timeout,
+            )
+            if attempt == 0:
+                first_latency = latency
+
+            transcript = transcript.strip()
+            if not transcript or validator is None:
+                return first_latency, transcript
+
+            validation = await validator.validate(question, transcript)
+            print(
+                "Transcript validation: "
+                f"accepted={validation.accepted}, source={validation.source}, "
+                f"reason={validation.reason!r}"
+            )
+            if validation.accepted:
+                return first_latency, validation.transcript
+
+            if attempt + 1 < max_attempts:
+                await self.say(
+                    "I may not have heard that correctly. Could you say that again?"
+                )
+
+        return first_latency, ""
+
+    async def run(
+        self,
+        profile: str,
+        vision_enabled: bool = True,
+        transcript_validator: CohereTranscriptValidator | None = None,
+    ):
         await self.furhat.connect()
         self.furhat.add_handler(Events.response_speak_end, self.on_speech_end)
         self.furhat.add_handler(Events.response_hear_start, self.on_hear_start)
@@ -163,9 +211,17 @@ class Demo:
             fact, guess = PROFILES[profile]
             await self.say(fact)
             await self.say(guess)
-            latency, transcript = await self.listen()
+            latency, transcript = await self.listen_for_valid_answer(
+                guess, transcript_validator
+            )
             print(f"Response latency: {latency!r} seconds; transcript: {transcript!r}")
-            await self.say(response_for(latency))
+            if latency is not None and not transcript:
+                await self.say(
+                    "I am sorry I still could not understand clearly. "
+                    "We can leave the guess there."
+                )
+            else:
+                await self.say(response_for(latency))
         finally:
             try:
                 await self.furhat.request_listen_stop()
@@ -182,11 +238,24 @@ def main():
         action="store_true",
         help="Skip the camera-based opening remark (for troubleshooting only)",
     )
+    parser.add_argument(
+        "--skip-cohere",
+        action="store_true",
+        help="Accept raw speech transcripts without Cohere validation",
+    )
     args = parser.parse_args()
+    try:
+        validator = (
+            None if args.skip_cohere else CohereTranscriptValidator.from_environment()
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     try:
         asyncio.run(
             Demo(args.host, os.getenv("FURHAT_AUTH_KEY")).run(
-                args.profile, vision_enabled=not args.skip_vision
+                args.profile,
+                vision_enabled=not args.skip_vision,
+                transcript_validator=validator,
             )
         )
     except (KeyboardInterrupt, EOFError):

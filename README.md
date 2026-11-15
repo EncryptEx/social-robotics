@@ -4,7 +4,8 @@ Prototype for the DD2413 project **â€œWhen Does Personalization Become Creepy?â€
 Furhat first observes a participant with its camera and, when the evidence is
 stable, makes a cautious comment about a red hat. It then runs a short scripted
 interaction contrasting a disclosed fact with a personal inference and adapts
-its closing response to the participant's hesitation.
+its closing response to the participant's hesitation. Cohere checks whether
+recognized speech is understandable and relevant before the robot accepts it.
 
 The camera remark happens before the study dialogue. It is intentionally
 limited to one reviewed, non-sensitive visual cue; the robot does not send
@@ -23,7 +24,9 @@ health, or other personal attributes.
    the participant's appearance.
 5. Furhat asks permission to make the scripted personal guess. The operator
    presses Enter only after the participant agrees.
-6. A reply that starts within three seconds receives a neutral acknowledgement.
+6. Cohere validates each non-empty speech transcript. If it rejects the text,
+   Furhat asks once for repetition instead of treating it as a real answer.
+7. A reply that starts within three seconds receives a neutral acknowledgement.
    A longer pause or silence makes Furhat back off and end the topic.
 
 All camera frames are processed in memory and discarded immediately. Nothing
@@ -35,8 +38,10 @@ is written to disk by the interaction.
 | --- | --- |
 | `lab1.py` | Furhat connection, visual opening, scripted dialogue, and response-timing policy |
 | `vision.py` | Camera decoding, face-localised red detection, and multi-frame consensus |
+| `transcript_validation.py` | Cohere structured-output validation for speech-to-text |
 | `test_lab1.py` | Dialogue-policy tests |
 | `test_vision.py` | Synthetic tests for image decoding, spatial filtering, and consensus |
+| `test_transcript_validation.py` | Mocked Cohere and fallback-policy tests |
 | `test-2.py` | Optional questionnaire that stores disclosed answers in Neo4j |
 | `compose.yaml` | Local Neo4j service for the optional questionnaire |
 
@@ -47,6 +52,7 @@ is written to disk by the interaction.
 - The laptop and Furhat on the same network
 - Realtime API local-network access enabled in Furhat's web interface
 - A participant facing the camera in reasonable, even lighting
+- A Cohere production API key for transcript validation
 
 The virtual Furhat SDK does not expose a camera, so the visual opening must be
 tested on a physical robot. If the Realtime API is protected, create a Realtime
@@ -61,6 +67,20 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
+
+Copy the environment template, add your Cohere key, and load it into the shell:
+
+```sh
+cp .env.example .env
+# Edit .env and replace the placeholder values.
+set -a
+source .env
+set +a
+```
+
+The code reads `COHERE_API_KEY` and defaults to `command-a-03-2025`. Set
+`COHERE_MODEL` only if the team deliberately validates another compatible
+model. `.env` is ignored by Git; never add an API key to Python or commit it.
 
 ## Run the complete interaction
 
@@ -81,6 +101,41 @@ python lab1.py --host 192.168.1.114 --profile games --skip-vision
 ```
 
 `--skip-vision` is a fallback, not the intended assessed demonstration.
+
+To rehearse without spending Cohere credits or when offline, add
+`--skip-cohere`. This accepts Furhat's raw speech transcript and should not be
+used when demonstrating the LLM validation feature.
+
+## Cohere transcript validation
+
+Each non-empty speech transcript is sent together with the question to Cohere's
+Chat V2 API. Structured Output restricts the response to two fields: a boolean
+decision and a short reason. The model never rewrites the participant's answer:
+accepted text is stored exactly as Furhat recognized it, while rejected text
+causes one request to repeat.
+
+The integration limits usage and latency:
+
+- obvious empty or `[inaudible]` results are rejected locally without an API call;
+- at most two recognized attempts are validated for any question;
+- input is truncated to 1,200 characters and output to 100 tokens;
+- API calls time out after eight seconds;
+- if Cohere is unavailable, the original transcript is accepted but clearly
+  logged as an unvalidated `fallback`, so the live interaction can continue.
+
+The operator terminal prints the decision source and reason, but never the API
+key. Review fallback entries before using collected answers in the study.
+
+Verify the key and model before connecting Furhat (this makes one API call):
+
+```sh
+python transcript_validation.py \
+  --question "What hobby do you enjoy?" \
+  --transcript "I enjoy indoor climbing."
+```
+
+A working cloud call reports `source=cohere`; `source=fallback` means the
+interaction would continue, but the LLM did not validate that transcript.
 
 ## Check the detector with a still image
 
@@ -105,7 +160,8 @@ python -m unittest -v
 ```
 
 The image tests generate their own arrays and do not need a camera or example
-photos. A passing offline suite does not replace a rehearsal on the real robot.
+photos. Cohere tests use a fake client, so they spend no credits and need no API
+key. A passing offline suite does not replace a rehearsal on the real robot.
 
 ## Live rehearsal checklist
 
@@ -114,6 +170,8 @@ photos. A passing offline suite does not replace a rehearsal on the real robot.
 - Test without a red hat and confirm that Furhat makes no appearance claim.
 - Test a red shirt and confirm that the head-only region prevents a hat claim.
 - Rehearse one prompt answer, one pause longer than three seconds, and silence.
+- Say one deliberately incoherent answer and confirm Furhat asks once to repeat.
+- Disconnect the internet and confirm the operator sees a `fallback` decision.
 - Confirm that Ctrl+C stops the interaction and disconnects cleanly.
 - If lighting or camera placement changes, repeat both positive and negative
   tests before collecting data.
@@ -148,6 +206,9 @@ Create `.env` from `.env.example`, choose a local password, and start Neo4j:
 ```sh
 cp .env.example .env
 docker compose up -d
+set -a
+source .env
+set +a
 python test-2.py --participant-id demo01 --mode voice --host 192.168.1.114
 ```
 
@@ -159,7 +220,9 @@ answers are disclosed facts; they must not be labelled as visual observations.
 
 Obtain consent before collecting questionnaire answers or recording a demo.
 Tell participants that the camera is used for the opening observation and that
-speech may be processed by Furhat's configured recognizer. Allow them to skip
-questions, correct the robot, stop the interaction, and withdraw their data.
-Do not silently add face recognition, image storage, cloud vision, or new
+speech is processed by Furhat's configured recognizer. With Cohere enabled, the
+question and recognized transcript are also sent to Cohere for validation; the
+consent form and data-processing description must say so. Allow participants
+to skip questions, correct the robot, stop the interaction, and withdraw their
+data. Do not silently add face recognition, image storage, cloud vision, or new
 appearance-based inferences without updating the consent and study protocol.
